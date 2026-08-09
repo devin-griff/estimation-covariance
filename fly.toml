@@ -1,9 +1,9 @@
-# Fly.io config for the <APP_TITLE> Streamlit app.
-# Public URL after deploy: https://<APP_NAME>.fly.dev
+# Fly.io config for the Estimation Covariance Streamlit app.
+# Public URL after deploy: https://griffith-pse-estimation-covariance.fly.dev
 # Custom domain (set up via Cloudflare DNS, see SETUP.md):
-#   https://<APP_SLUG>.griffith-pse.com
+#   https://estimation-covariance.griffith-pse.com
 
-app = "<APP_NAME>"
+app = "griffith-pse-estimation-covariance"
 primary_region = "ord"  # Chicago: central US, low latency for North American users.
 
 [build]
