@@ -1,1 +1,13 @@
-streamlit~=1.30
+# pounce supplies the covariance primitive this app is built around
+# (declare_fitted / declare_residual / covariance), which landed in the
+# 0.8 line. Pin the minor so a rebuild cannot drop to a release without it.
+pyomo-pounce~=0.8
+pyomo~=6.10
+#
+# Stable surface APIs at our usage level (sliders, charts), so accept patch
+# upgrades. pandas stays on 2.x: Streamlit 1.52+ caps pandas <3, so a ~=3.0
+# pin makes the image's pip resolve impossible.
+streamlit~=1.52
+pandas~=2.0
+numpy~=1.26
+altair~=5.0
