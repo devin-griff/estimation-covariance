@@ -924,7 +924,7 @@ def render_logs(d):
 # ── 9. Main ──────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Parameter Estimation Covariance",
+    page_title="Estimation Covariance",
     page_icon="favicon.png",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -952,7 +952,7 @@ init_state()
 st.markdown(
     "<h2 style='margin: 0 0 0.25rem 0; padding: 0; font-size: 1.5rem; "
     "font-weight: 700;'>"
-    "Parameter Estimation Covariance "
+    "Estimation Covariance "
     "<a href='https://github.com/devin-griff/estimation-covariance' "
     "target='_blank' title='View source on GitHub' "
     "style='display: inline-block; vertical-align: 0.02em; "
