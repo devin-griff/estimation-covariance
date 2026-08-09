@@ -182,7 +182,7 @@ def build_model(x, y, declare):
     return m
 
 
-def _solve_and_extract(x, y):
+def _solve_and_extract(x, y, sigma_true):
     """Solve once, read the covariance, return PLAIN data.
 
     Everything pounce-owned is created and destroyed inside this call, on the
@@ -220,11 +220,34 @@ def _solve_and_extract(x, y):
         notes = [str(w.message) for w in caught]
 
         C = np.array(cov.matrix, dtype=float)
+
+        # A SECOND covariance, built from the noise level the data were
+        # actually generated with instead of this dataset's estimate of it.
+        # Only used as the calibration reference: sigma_hat inherits one
+        # dataset's chi-square fluctuation (here it can easily land 15% low),
+        # which would shrink the region and make a perfectly calibrated
+        # method report coverage well under 95%. The displayed matrix and the
+        # solid ellipse stay on sigma_hat, which is what a practitioner
+        # actually has.
+        C_known = C
+        if sigma_true and sigma_true > 0:
+            cov_known = None
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    cov_known = covariance(m, sigma_sq=float(sigma_true) ** 2)
+                C_known = np.array(cov_known.matrix, dtype=float)
+            except Exception:
+                C_known = C
+            finally:
+                del cov_known
+
         out = {
             "status": "optimal",
             "A": float(pyo.value(m.A)),
             "k": float(pyo.value(m.k)),
             "C": C.tolist(),
+            "C_known": C_known.tolist(),
             "se": [float(cov.std_err[m.A]), float(cov.std_err[m.k])],
             "corr": float(cov.correlation[m.A, m.k]),
             "sigma_hat": float(np.sqrt(cov.sigma_sq)),
@@ -247,7 +270,7 @@ def fit(a_true, k_true, sigma, x_min, x_max, n_pts, seed):
     value costs nothing."""
     x, y = make_data(a_true, k_true, sigma, x_min, x_max, n_pts, seed)
     with _solve_lock():
-        out = _solve_and_extract(x, y)
+        out = _solve_and_extract(x, y, sigma)
     out["x"] = x.tolist()
     out["y"] = y.tolist()
     return out
@@ -544,8 +567,12 @@ def parameter_panel(d, a_true, k_true, mc):
                      alt.Tooltip("k:Q", format=".4f")],
         ))
         # The refits are sampled around the TRUTH, so the region they are
-        # tested against is centered there, not on this one estimate.
-        ref = ellipse_points(np.array([a_true, k_true]), C)
+        # tested against is centered there, not on this one estimate, and it
+        # is built from the known noise level rather than this dataset's
+        # estimate of it. Both choices are what make the reported coverage a
+        # test of the method instead of a test of one lucky sigma_hat.
+        ref = ellipse_points(np.array([a_true, k_true]),
+                             np.asarray(d.get("C_known", C), dtype=float))
         layers.append(alt.Chart(
             pd.DataFrame({"A": ref[:, 0], "k": ref[:, 1]})
         ).mark_line(size=1.2, color=COLOR_TRUTH, strokeDash=[3, 3]).encode(
@@ -650,6 +677,17 @@ def render_formulation():
         "refits are actually sampled from. Centering on one estimate instead "
         "would cover only about 78%, since two independent estimates differ "
         "with twice the covariance."
+    )
+    st.markdown(
+        "That reference region is also built from the **known** noise level "
+        "rather than this dataset's $\\hat\\sigma$. The solid ellipse and the "
+        "matrix beside it use $\\hat\\sigma$, because that is what a "
+        "practitioner actually has, but $\\hat\\sigma$ carries its own "
+        "chi-square fluctuation: draw a dataset whose $\\hat\\sigma$ lands "
+        "15% low and the solid ellipse shrinks with it, which would drag the "
+        "measured coverage well below 95% even though nothing is wrong with "
+        "the method. Comparing the two curves shows exactly how much that "
+        "one nuisance parameter moves the answer."
     )
     st.markdown(
         "Narrowing the x range to a short late window is worth trying: there "
@@ -758,11 +796,17 @@ def render_main(d, a_true, k_true, sigma):
     st.divider()
     if mc and mc.get("fits"):
         fits = np.asarray(mc["fits"], dtype=float)
-        cover = coverage_fraction(fits, [a_true, k_true], C)
+        C_known = np.asarray(d.get("C_known", C), dtype=float)
+        cover = coverage_fraction(fits, [a_true, k_true], C_known)
         binom_se = 100.0 * np.sqrt(0.95 * 0.05 / max(len(fits), 1))
         m1, m2, m3 = st.columns(3)
         m1.metric("coverage of the 95% region", f"{100 * cover:.1f}%",
-                  f"± {binom_se:.1f}% sampling noise", delta_color="off")
+                  f"± {binom_se:.1f}% sampling noise", delta_color="off",
+                  help="Measured against the dashed region: centered at the "
+                       "true parameters and built from the known noise "
+                       "level. Centering on this one estimate instead would "
+                       "cover about 78%, and using this dataset's σ̂ would "
+                       "add its own fluctuation on top.")
         m2.metric("covariance()", f"{1000 * d['cov_seconds']:.0f} ms",
                   "one backsolve per parameter", delta_color="off")
         m3.metric(f"Monte Carlo, {len(fits)} refits",
