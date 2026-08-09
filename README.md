@@ -57,6 +57,20 @@ auto-stop machines. Custom domain wired through Cloudflare DNS.
 - **Machine**: `shared-cpu-1x` · 1 GB RAM · single region (`ord`) · `min_machines_running=0` (auto-stops on idle).
 - **Cost ceiling**: ~$3.89/mo if traffic kept the VM awake 24/7. Realistic on idle-heavy demo traffic: well under $1/mo per app. Bandwidth is effectively free under Fly's 100 GB/mo egress allowance.
 
+## References
+
+- G. A. F. Seber and C. J. Wild, *Nonlinear Regression*. Wiley, New York,
+  1989. The asymptotic covariance of least-squares estimates.
+  [Wiley](https://onlinelibrary.wiley.com/doi/book/10.1002/0471725315)
+- G. Cumming and R. Maillardet, "Confidence intervals and replication:
+  Where will the next mean fall?" *Psychological Methods*, 11(3):217-227,
+  2006. The capture-percentage result: a 95% confidence interval captures
+  a replication's estimate well under 95% of the time.
+  [DOI](https://doi.org/10.1037/1082-989X.11.3.217)
+- J. Kitchin, POUNCE: [github.com/jkitchin/pounce](https://github.com/jkitchin/pounce);
+  the Pyomo plugin and `covariance()` ship as
+  [pyomo-pounce](https://pypi.org/project/pyomo-pounce/).
+
 ## Files
 
 - `app.py`: Streamlit UI and computation

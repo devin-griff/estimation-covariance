@@ -747,6 +747,28 @@ def render_formulation():
         "pair looks like before any prediction is made."
     )
 
+    st.markdown("**References**")
+    st.markdown(
+        "[1] G. A. F. Seber and C. J. Wild, *Nonlinear Regression*. "
+        "Wiley, New York, 1989 (the asymptotic covariance of least-squares "
+        "estimates). "
+        "[Wiley](https://onlinelibrary.wiley.com/doi/book/10.1002/0471725315)"
+    )
+    st.markdown(
+        "[2] G. Cumming and R. Maillardet, \"Confidence intervals and "
+        "replication: Where will the next mean fall?\" *Psychological "
+        "Methods*, 11(3):217-227, 2006 (the capture-percentage result: a "
+        "95% confidence interval captures a replication's estimate well "
+        "under 95% of the time). "
+        "[DOI](https://doi.org/10.1037/1082-989X.11.3.217)"
+    )
+    st.markdown(
+        "[3] J. Kitchin, *POUNCE*. "
+        "[GitHub](https://github.com/jkitchin/pounce); the Pyomo plugin "
+        "and `covariance()` ship as "
+        "[pyomo-pounce](https://pypi.org/project/pyomo-pounce/)."
+    )
+
 
 # ── 7. CSS ───────────────────────────────────────────────────────────────────
 
