@@ -1,4 +1,4 @@
-# Estimation Covariance
+# Parameter Estimation Covariance
 
 Parameter uncertainty from one solve, checked against Monte Carlo
 

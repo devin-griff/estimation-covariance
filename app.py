@@ -40,7 +40,7 @@
 # File roadmap (matching the section banners below):
 #   1. Constants   : palette, defaults, statistical critical values.
 #   2. Solver      : model build, the fit + covariance call, Monte Carlo.
-#   3. Geometry    : covariance matrix -> ellipse, box, marginal intervals.
+#   3. Geometry    : covariance matrix -> ellipse and principal axes.
 #   4. State       : session_state init, seed re-rolls, staleness.
 #   5. Charts      : the three panels of the main row.
 #   6. LaTeX       : formulation tab content.
@@ -74,15 +74,11 @@ from pyomo_pounce import covariance, declare_fitted, declare_residual
 # Chi-square critical value with 2 degrees of freedom at 95%. This is the
 # level set that makes the ellipse a JOINT 95% region for (A, k).
 CHI2_95_2DOF = 5.991
-# Normal critical value at 95%, for a SINGLE parameter's marginal interval.
-# sqrt(5.991) = 2.4477 > 1.96, which is why the joint region's shadow on one
-# axis is wider than that parameter's own confidence interval.
-Z_95 = 1.959964
 
 # Wong (2011) palette, the family standard. Each covariance entry is keyed to
 # the geometric feature it controls in the parameter-space panel.
-COLOR_VAR_A = "#0072B2"   # var(A): the box's horizontal half-width
-COLOR_VAR_K = "#E69F00"   # var(k): the box's vertical half-width
+COLOR_VAR_A = "#0072B2"   # var(A): A's own spread
+COLOR_VAR_K = "#E69F00"   # var(k): k's own spread
 COLOR_COV = "#009E73"     # cov(A,k): the tilt, and the true ellipse
 COLOR_TRUTH = "#D55E00"   # the parameter values the user chose
 COLOR_MC = "#7f7f7f"      # Monte Carlo refits
@@ -182,7 +178,7 @@ def build_model(x, y, declare):
     return m
 
 
-def _solve_and_extract(x, y, sigma_true):
+def _solve_and_extract(x, y):
     """Solve once, read the covariance, return PLAIN data.
 
     Everything pounce-owned is created and destroyed inside this call, on the
@@ -213,46 +209,59 @@ def _solve_and_extract(x, y, sigma_true):
         # in the cases this app is built to show, so it is surfaced in the UI
         # rather than swallowed into the terminal.
         t0 = time.perf_counter()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            cov = covariance(m)
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cov = covariance(m)
+        except Exception as exc:
+            # In the no-signal regime the solve can converge while the KKT
+            # backsolve fails: the information matrix is numerically
+            # singular. Report it as a status, with the point estimate kept
+            # so the data panel can still draw the fitted curve.
+            return {"status": "singular", "detail": str(exc),
+                    "A": float(pyo.value(m.A)), "k": float(pyo.value(m.k)),
+                    "log": buf.getvalue()}
         cov_seconds = time.perf_counter() - t0
-        notes = [str(w.message) for w in caught]
+        # pounce's warning text is solver-speak with raw perturbation values.
+        # The UI shows one plain sentence; the verbatim warnings go to the
+        # Logs tab for anyone who wants the numbers.
+        notes = []
+        note_details = [str(w.message) for w in caught]
+        if note_details:
+            notes.append(
+                "The covariance is approximate here: the two parameters are "
+                "nearly indistinguishable over this window. Details on the "
+                "Logs tab."
+            )
 
-        C = np.array(cov.matrix, dtype=float)
+        # sigma_hat, derived from the residuals with nothing passed by hand,
+        # is reported as a metric: it is what the data alone say the noise
+        # level is.
+        sigma_hat = float(np.sqrt(cov.sigma_sq))
 
-        # A SECOND covariance, built from the noise level the data were
-        # actually generated with instead of this dataset's estimate of it.
-        # Only used as the calibration reference: sigma_hat inherits one
-        # dataset's chi-square fluctuation (here it can easily land 15% low),
-        # which would shrink the region and make a perfectly calibrated
-        # method report coverage well under 95%. The displayed matrix and the
-        # solid ellipse stay on sigma_hat, which is what a practitioner
-        # actually has.
-        C_known = C
-        if sigma_true and sigma_true > 0:
-            cov_known = None
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    cov_known = covariance(m, sigma_sq=float(sigma_true) ** 2)
-                C_known = np.array(cov_known.matrix, dtype=float)
-            except Exception:
-                C_known = C
-            finally:
-                del cov_known
+        # ONE matrix drives everything shown: the middle panel, the ellipse,
+        # the axes, and the coverage count. It is exactly what covariance()
+        # reports, scaled by sigma_hat from the residuals: the practitioner's
+        # answer, which is the point of the exercise. The price is that
+        # sigma_hat carries one dataset's chi-square fluctuation, so the
+        # measured coverage sits a few points under 95% at small n and
+        # swings dataset to dataset; the Formulation tab says so.
+        C_plot = np.array(cov.matrix, dtype=float)
+        se_plot = [float(cov.std_err[m.A]), float(cov.std_err[m.k])]
 
         out = {
             "status": "optimal",
             "A": float(pyo.value(m.A)),
             "k": float(pyo.value(m.k)),
-            "C": C.tolist(),
-            "C_known": C_known.tolist(),
-            "se": [float(cov.std_err[m.A]), float(cov.std_err[m.k])],
+            "C_plot": C_plot.tolist(),
+            "se": se_plot,
+            # Correlation is scale free, so rescaling the matrix by a
+            # different noise variance leaves it unchanged.
             "corr": float(cov.correlation[m.A, m.k]),
-            "sigma_hat": float(np.sqrt(cov.sigma_sq)),
+            "sigma_hat": sigma_hat,
             "cov_seconds": cov_seconds,
             "notes": notes,
+            "note_details": note_details,
             "log": buf.getvalue(),
         }
         del results
@@ -270,7 +279,7 @@ def fit(a_true, k_true, sigma, x_min, x_max, n_pts, seed):
     value costs nothing."""
     x, y = make_data(a_true, k_true, sigma, x_min, x_max, n_pts, seed)
     with _solve_lock():
-        out = _solve_and_extract(x, y, sigma)
+        out = _solve_and_extract(x, y)
     out["x"] = x.tolist()
     out["y"] = y.tolist()
     return out
@@ -281,14 +290,14 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
     """Refit `n_draws` independent synthetic datasets drawn from the same
     truth and noise level. This is the brute-force answer the covariance
     predicts analytically, and its cost is the point: one full solve per
-    draw, against a single backsolve for the whole ellipse.
+    draw, against a single fit for the region on screen.
 
     Not cached: it sits behind an explicit button, and the result is stored
     in session_state so it can be cleared the moment a data setting changes.
     """
     x = np.linspace(x_min, x_max, n_pts)
     clean = a_true * np.exp(-k_true * x)
-    fits = np.empty((n_draws, 2))
+    fits = np.full((n_draws, 2), np.nan)
     opt = pyo.SolverFactory("pounce")
     failures = 0
     t0 = time.perf_counter()
@@ -305,7 +314,6 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
                     res = opt.solve(m)
             if str(res.solver.termination_condition) != "optimal":
                 failures += 1
-                fits[j] = (np.nan, np.nan)
             else:
                 fits[j] = (pyo.value(m.A), pyo.value(m.k))
             m = None
@@ -318,8 +326,9 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
     finally:
         del opt
         gc.collect()
+    ok = ~np.isnan(fits).any(axis=1)
     return {
-        "fits": fits[~np.isnan(fits).any(axis=1)].tolist(),
+        "fits": fits[ok].tolist(),
         "failures": failures,
         "seconds": time.perf_counter() - t0,
         "n_draws": int(n_draws),
@@ -332,13 +341,10 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
 # covariance matrix C, for the 95% region {d : d' C^-1 d <= 5.991}:
 #
 #   - semi-axes      : sqrt(5.991 * lambda_i) along the eigenvectors of C
-#   - bounding box   : half-widths sqrt(5.991) * se, from the DIAGONAL only
-#   - marginal band  : half-widths 1.96 * se, the single-parameter interval
 #
-# The box depends on the diagonal alone, so zeroing the off-diagonal gives a
-# different ellipse inscribed in the SAME box: the covariance term does not
-# change either parameter's own spread, it only tilts the joint region. That
-# pairing is what the panel is built to show.
+# Zeroing the off-diagonal gives the companion ellipse: the covariance term
+# does not change either parameter's own spread, it only tilts the joint
+# region. That pairing is what the panel is built to show.
 
 def ellipse_points(center, C, n=241):
     """Points on the 95% ellipse for covariance C, centered at `center`."""
@@ -350,22 +356,6 @@ def ellipse_points(center, C, n=241):
     return pts + np.asarray(center, dtype=float)
 
 
-def eigen_summary(C):
-    """Eigenvalues ascending plus the dominant (sloppiest) direction. When
-    the ratio is large the fit pins one combination of the parameters far
-    better than either parameter alone, which is what unidentifiability looks
-    like in these numbers."""
-    evals, evecs = np.linalg.eigh(np.asarray(C, dtype=float))
-    return evals, evecs[:, -1]
-
-
-def coverage_fraction(fits, center, C):
-    """Fraction of refits inside the 95% region centered at `center`."""
-    d = np.asarray(fits, dtype=float) - np.asarray(center, dtype=float)
-    q = np.einsum("ij,jk,ik->i", d, np.linalg.inv(np.asarray(C, dtype=float)), d)
-    return float((q <= CHI2_95_2DOF).mean())
-
-
 # ── 4. State ─────────────────────────────────────────────────────────────────
 
 def init_state():
@@ -375,50 +365,51 @@ def init_state():
     st.session_state.setdefault("mc_sig", None)
 
 
-def reroll_data():
-    """Advance the dataset seed: a new noise draw, so a new fit and a new
-    ellipse. Runs as a button callback, which is the one place a
-    widget-backed session_state key may be assigned."""
-    st.session_state.seed = int(st.session_state.seed) + 1
-
-
-def reroll_mc():
-    """Advance the Monte Carlo seed block: the same fit, a fresh cloud. Makes
-    it visible that coverage is itself a random quantity hovering near 95%
-    rather than a fixed property of the method."""
-    st.session_state.mc_seed = int(st.session_state.mc_seed) + 1
-
-
 def data_signature():
-    """Everything that changes the dataset, and therefore invalidates a
-    stored Monte Carlo cloud. A scatter drawn under one truth sitting beneath
-    an ellipse computed under another would be actively misleading, so the
-    cloud is dropped rather than redrawn."""
+    """Everything the stored Monte Carlo cloud depends on: a cloud generated
+    under one truth sitting beneath a region computed under another would
+    be actively misleading, so the cloud is dropped when any of these
+    change. The MC seed and draw count are included because the stored
+    sweep no longer matches the controls once either moves. The dataset
+    seed is deliberately absent: it moves only YOUR
+    dataset and its fitted region, not the cloud, so stepping it with a
+    sweep on screen shows the sigma_hat-sized region wobbling against
+    fixed refits."""
     ss = st.session_state
-    return (ss.a_true, ss.k_true, ss.sigma, tuple(ss.x_range),
-            ss.n_pts, ss.seed)
+    return (ss.a_true, ss.k_true, ss.sigma, tuple(ss.x_range), ss.n_pts,
+            ss.mc_seed, ss.n_draws)
 
 
 # ── 5. Charts ────────────────────────────────────────────────────────────────
 
-PANEL_HEIGHT = 330
+# Plotting-area size (a square side) shared by the data and parameter
+# panels. 300 is the largest that fits both squares, the matrix, and the
+# side legend across one row on a laptop-width window.
+PANEL_HEIGHT = 300
 _AXIS = {"labelFontSize": 12, "titleFontSize": 13}
 
 
 def data_panel(d, a_true, k_true):
     """Left panel: the fit in data space. The noisy sample, the fitted
-    curve, and the curve the data were generated from."""
+    curve, and the curve the data were generated from. When the fit failed
+    there is no fitted curve, and the panel still renders: seeing the truth
+    buried in noise IS the explanation of the failure."""
     x = np.asarray(d["x"])
     y = np.asarray(d["y"])
     xx = np.linspace(float(x.min()), float(x.max()), 240)
-    curves = pd.concat([
-        pd.DataFrame({"x": xx, "y": d["A"] * np.exp(-d["k"] * xx),
-                      "series": "fitted"}),
-        pd.DataFrame({"x": xx, "y": a_true * np.exp(-k_true * xx),
-                      "series": "truth"}),
-    ])
-    scale = alt.Scale(domain=["fitted", "truth"],
-                      range=[COLOR_COV, COLOR_TRUTH])
+    frames = []
+    domain, colors = [], []
+    if d.get("A") is not None:
+        frames.append(pd.DataFrame(
+            {"x": xx, "y": d["A"] * np.exp(-d["k"] * xx), "series": "fitted"}))
+        domain.append("fitted")
+        colors.append(COLOR_COV)
+    frames.append(pd.DataFrame(
+        {"x": xx, "y": a_true * np.exp(-k_true * xx), "series": "truth"}))
+    domain.append("truth")
+    colors.append(COLOR_TRUTH)
+    curves = pd.concat(frames)
+    scale = alt.Scale(domain=domain, range=colors)
     lines = alt.Chart(curves).mark_line(size=2).encode(
         x=alt.X("x:Q", title="x"),
         y=alt.Y("y:Q", title="y"),
@@ -433,8 +424,12 @@ def data_panel(d, a_true, k_true):
         tooltip=[alt.Tooltip("x:Q", format=".3f"),
                  alt.Tooltip("y:Q", format=".3f")],
     )
+    # Same fixed plotting-area size as the parameter panel, so the two
+    # bookend plots read as equals.
     return alt.layer(lines, pts).properties(
-        height=PANEL_HEIGHT).configure_axis(**_AXIS)
+        width=PANEL_HEIGHT, height=PANEL_HEIGHT,
+        autosize=alt.AutoSizeParams(type="pad", contains="padding"),
+    ).configure_axis(**_AXIS)
 
 
 def _fmt(v):
@@ -446,13 +441,13 @@ def _fmt(v):
     return f"{v:.2e}"
 
 
-def matrix_panel(C, title, keyed=True):
+def matrix_panel(C):
     """Middle panel: the covariance matrix itself.
 
     Cells are colored by the ROLE each entry plays in the right-hand panel
     rather than by magnitude, so the two panels read as one object: the
-    diagonal entries set the bounding box, the shared off-diagonal entry
-    sets the tilt.
+    diagonal entries set each parameter's spread, the shared off-diagonal
+    entry sets the tilt.
     """
     C = np.asarray(C, dtype=float)
     names = ["A", "k"]
@@ -463,132 +458,186 @@ def matrix_panel(C, title, keyed=True):
             rows.append({
                 "row": names[i], "col": names[j], "val": float(C[i, j]),
                 "label": _fmt(C[i, j]),
-                "role": role if keyed else "plain",
+                "role": role,
             })
     df = pd.DataFrame(rows)
     scale = alt.Scale(
-        domain=["var(A)", "var(k)", "cov", "plain"],
-        range=[COLOR_VAR_A, COLOR_VAR_K, COLOR_COV, "#94a3b8"],
+        domain=["var(A)", "var(k)", "cov"],
+        range=[COLOR_VAR_A, COLOR_VAR_K, COLOR_COV],
     )
     base = alt.Chart(df).encode(
+        # labelAngle=0 keeps the column headers upright: Vega-Lite rotates
+        # nominal x-axis labels a quarter turn by default.
         x=alt.X("col:N", title=None, sort=names,
-                axis=alt.Axis(labelFontSize=13, orient="top")),
+                axis=alt.Axis(labelFontSize=14, orient="top", labelAngle=0)),
         y=alt.Y("row:N", title=None, sort=names,
-                axis=alt.Axis(labelFontSize=13)),
+                axis=alt.Axis(labelFontSize=14)),
     )
     cells = base.mark_rect(stroke="white", strokeWidth=3, opacity=0.9).encode(
         color=alt.Color("role:N", scale=scale, legend=None),
         tooltip=[alt.Tooltip("val:Q", format=".6g", title="value")],
     )
-    text = base.mark_text(fontSize=12, fontWeight="bold", color="white").encode(
+    text = base.mark_text(fontSize=16, fontWeight="bold", color="white").encode(
         text="label:N")
+    # Fixed size like the two plot panels, so the row's column ratios can be
+    # matched to the charts' true widths and the gaps come out uniform.
     return alt.layer(cells, text).properties(
-        height=190, title=alt.TitleParams(title, fontSize=12, anchor="start"),
+        width=140, height=160,
+        autosize=alt.AutoSizeParams(type="pad", contains="padding"),
     )
 
 
 def parameter_panel(d, a_true, k_true, mc):
     """Right panel: the same matrix, drawn.
 
-    Layers, in the order they teach:
-      - the dashed box, set by the diagonal entries alone;
-      - the axis-aligned ellipse the matrix would give with no covariance;
-      - the actual, tilted ellipse;
-      - the marginal 95% crosshair, deliberately shorter than the box;
-      - the Monte Carlo cloud and a truth-centered reference ellipse, once
-        a sweep has been run.
+    Two curves from ONE matrix about ONE center:
+      - the actual, tilted 95% region;
+      - the axis-aligned ellipse the same matrix gives with its off-diagonal
+        zeroed;
+      - the principal axes of the region: the eigenvectors of C, each drawn
+        with length sqrt(5.991 * eigenvalue);
+      - the Monte Carlo cloud, once a sweep has been run.
+
+    Everything is centered on the TRUE parameters, which is where the
+    sampling distribution the refits are drawn from actually sits. The
+    estimate from this one dataset is a dot, since that is what it is: one
+    draw from the cloud.
+
+    The panel is square with an EQUAL data span on both axes, so one data
+    unit is the same number of pixels in A as in k. That is what makes the
+    eigenvector geometry honest: the principal axes render truly orthogonal
+    and the tilt angle is the real one, not an artifact of axis stretching.
     """
-    C = np.asarray(d["C"], dtype=float)
-    se = np.asarray(d["se"], dtype=float)
-    center = np.array([d["A"], d["k"]], dtype=float)
+    C = np.asarray(d["C_plot"], dtype=float)
+    se = np.sqrt(np.diag(C))
+    center = np.array([a_true, k_true], dtype=float)
     half = np.sqrt(CHI2_95_2DOF) * se
 
-    # Every layer must declare the same non-zero-anchored scales. Altair
-    # merges scales across a layered chart, so letting one layer default to
-    # zero=True would drag both axes back to the origin and flatten the
-    # ellipse into an unreadable speck.
-    def _x(title="A"):
-        return alt.X("A:Q", title=title, scale=alt.Scale(zero=False))
+    # Shared square domain: every plotted item fits, both axes span the same
+    # width. Scales merge across layers, so every layer declares these.
+    extent = [half[0], half[1],
+              abs(d["A"] - center[0]) * 1.3, abs(d["k"] - center[1]) * 1.3]
+    if mc and mc.get("fits"):
+        pts = np.asarray(mc["fits"], dtype=float)
+        extent += [np.abs(pts[:, 0] - center[0]).max(),
+                   np.abs(pts[:, 1] - center[1]).max()]
+    h = 1.12 * max(extent)
+    dom_x = [center[0] - h, center[0] + h]
+    dom_y = [center[1] - h, center[1] + h]
 
-    def _y(title="k"):
-        return alt.Y("k:Q", title=title, scale=alt.Scale(zero=False))
+    def _x(field="A", title="A"):
+        return alt.X(f"{field}:Q", title=title,
+                     scale=alt.Scale(domain=dom_x, zero=False, nice=False))
+
+    def _y(field="k", title="k"):
+        return alt.Y(f"{field}:Q", title=title,
+                     scale=alt.Scale(domain=dom_y, zero=False, nice=False))
 
     ell = ellipse_points(center, C)
     ell_diag = ellipse_points(center, np.diag(np.diag(C)))
+    # The `t` column preserves the angular drawing order. Without an explicit
+    # order channel, Altair connects line points sorted by x, which turns a
+    # closed curve into a zigzag band between its upper and lower branches.
     curves = pd.concat([
         pd.DataFrame({"A": ell[:, 0], "k": ell[:, 1],
-                      "series": "95% region"}),
+                      "t": np.arange(len(ell)), "series": "95% region"}),
         pd.DataFrame({"A": ell_diag[:, 0], "k": ell_diag[:, 1],
+                      "t": np.arange(len(ell_diag)),
                       "series": "if uncorrelated"}),
     ])
-    scale = alt.Scale(domain=["95% region", "if uncorrelated"],
-                      range=[COLOR_COV, COLOR_UNCORR])
+    # One shared color scale names every mark in the panel, so the legend is
+    # the complete explanation and no tooltips are needed. The Monte Carlo
+    # entry joins the domain only once a sweep exists; with a fixed domain
+    # its legend entry would appear before there was anything to explain.
+    domain = ["95% region", "if uncorrelated", "principal axes",
+              "estimate", "truth"]
+    colors = [COLOR_COV, COLOR_UNCORR, "#475569", "#111827", COLOR_TRUTH]
+    # Legend glyph per entry. A merged legend over mixed mark types falls
+    # back to a dot for every entry; an explicit shape scale on the same
+    # field draws the line series as line strokes.
+    symbols = ["stroke", "stroke", "stroke", "circle", "cross"]
+    if mc and mc.get("fits"):
+        domain.insert(3, "Monte Carlo refits")
+        colors.insert(3, COLOR_MC)
+        symbols.insert(3, "circle")
+    scale = alt.Scale(domain=domain, range=colors)
+    shape_scale = alt.Scale(domain=domain, range=symbols)
+    # orient="right" puts the legend in its own gutter beside the plot
+    # rather than overlaying the plotting area. Kept deliberately compact:
+    # together with autosize='pad' below, the legend adds to the svg's total
+    # width instead of being carved out of the square plotting area.
+    legend = alt.Legend(title=None, orient="right", labelFontSize=13,
+                        symbolSize=90, labelLimit=150, offset=8,
+                        rowPadding=3)
 
     layers = []
 
-    box = pd.DataFrame({"a1": [center[0] - half[0]], "a2": [center[0] + half[0]],
-                        "k1": [center[1] - half[1]], "k2": [center[1] + half[1]]})
-    layers.append(alt.Chart(box).mark_rect(
-        fillOpacity=0.0, stroke="#475569", strokeWidth=1.2, strokeDash=[5, 4],
-    ).encode(
-        x=alt.X("a1:Q", title="A", scale=alt.Scale(zero=False)), x2="a2:Q",
-        y=alt.Y("k1:Q", title="k", scale=alt.Scale(zero=False)), y2="k2:Q",
-    ))
-
     layers.append(alt.Chart(curves).mark_line(size=2).encode(
         x=_x(), y=_y(),
-        color=alt.Color("series:N", scale=scale,
-                        legend=alt.Legend(title=None, orient="top-right")),
+        order=alt.Order("t:Q"),
+        color=alt.Color("series:N", scale=scale, legend=legend),
         strokeDash=alt.StrokeDash("series:N", legend=None),
     ))
 
-    # Marginal 95% intervals: 1.96 se, against the box's 2.45 se. The visible
-    # gap is the point, so these are drawn through the center as a crosshair.
-    marg = pd.DataFrame({
-        "a1": [center[0] - Z_95 * se[0], center[0]],
-        "a2": [center[0] + Z_95 * se[0], center[0]],
-        "k1": [center[1], center[1] - Z_95 * se[1]],
-        "k2": [center[1], center[1] + Z_95 * se[1]],
-    })
-    layers.append(alt.Chart(marg).mark_rule(
-        color="#111827", strokeWidth=2, opacity=0.85,
+    # Principal axes: the eigenvectors of C, each drawn through the center
+    # with half-length sqrt(5.991 * eigenvalue), so their tips touch the 95%
+    # region. Rendered truly orthogonal thanks to the square equal-span
+    # scales above. Drawn as line marks (two points per axis, split by the
+    # detail channel) rather than rules, so the legend glyph is a line.
+    evals, evecs = np.linalg.eigh(C)
+    evals = np.clip(evals, 0.0, None)
+    ax_rows = []
+    for i in range(2):
+        tip = evecs[:, i] * np.sqrt(CHI2_95_2DOF * evals[i])
+        for sgn in (-1.0, 1.0):
+            ax_rows.append({"A": center[0] + sgn * tip[0],
+                            "k": center[1] + sgn * tip[1],
+                            "axis": i, "series": "principal axes"})
+    layers.append(alt.Chart(pd.DataFrame(ax_rows)).mark_line(
+        size=1.5, opacity=0.9,
     ).encode(
-        x=alt.X("a1:Q", title="A", scale=alt.Scale(zero=False)), x2="a2:Q",
-        y=alt.Y("k1:Q", title="k", scale=alt.Scale(zero=False)), y2="k2:Q",
+        x=_x(), y=_y(),
+        detail="axis:N",
+        color=alt.Color("series:N", scale=scale, legend=legend),
     ))
 
     if mc and mc.get("fits"):
         pts = np.asarray(mc["fits"], dtype=float)
         layers.insert(0, alt.Chart(
-            pd.DataFrame({"A": pts[:, 0], "k": pts[:, 1]})
-        ).mark_circle(size=18, color=COLOR_MC, opacity=0.35).encode(
+            pd.DataFrame({"A": pts[:, 0], "k": pts[:, 1],
+                          "series": "Monte Carlo refits"})
+        ).mark_point(filled=True, size=18, opacity=0.35).encode(
             x=_x(), y=_y(),
-            tooltip=[alt.Tooltip("A:Q", format=".4f"),
-                     alt.Tooltip("k:Q", format=".4f")],
+            color=alt.Color("series:N", scale=scale, legend=legend),
+            shape=alt.Shape("series:N", scale=shape_scale, legend=legend),
         ))
-        # The refits are sampled around the TRUTH, so the region they are
-        # tested against is centered there, not on this one estimate, and it
-        # is built from the known noise level rather than this dataset's
-        # estimate of it. Both choices are what make the reported coverage a
-        # test of the method instead of a test of one lucky sigma_hat.
-        ref = ellipse_points(np.array([a_true, k_true]),
-                             np.asarray(d.get("C_known", C), dtype=float))
-        layers.append(alt.Chart(
-            pd.DataFrame({"A": ref[:, 0], "k": ref[:, 1]})
-        ).mark_line(size=1.2, color=COLOR_TRUTH, strokeDash=[3, 3]).encode(
-            x=_x(), y=_y()))
 
+    # The truth is the center of everything drawn; the estimate from this one
+    # dataset is a single dot, one draw from the same cloud the refits fill in.
+    # Filled, like the legend renders its glyphs, so the mark on the plot
+    # and the mark in the legend are the same symbol.
     layers.append(alt.Chart(
-        pd.DataFrame({"A": [a_true], "k": [k_true]})
-    ).mark_point(shape="cross", size=150, color=COLOR_TRUTH,
-                 strokeWidth=3, filled=False).encode(x=_x(), y=_y()))
+        pd.DataFrame({"A": [a_true], "k": [k_true], "series": "truth"})
+    ).mark_point(size=150, filled=True).encode(
+        x=_x(), y=_y(),
+        color=alt.Color("series:N", scale=scale, legend=legend),
+        shape=alt.Shape("series:N", scale=shape_scale, legend=legend)))
     layers.append(alt.Chart(
-        pd.DataFrame({"A": [center[0]], "k": [center[1]]})
-    ).mark_point(size=90, color="#111827", filled=True).encode(
-        x=_x(), y=_y()))
+        pd.DataFrame({"A": [d["A"]], "k": [d["k"]], "series": "estimate"})
+    ).mark_point(size=90, filled=True).encode(
+        x=_x(), y=_y(),
+        color=alt.Color("series:N", scale=scale, legend=legend),
+        shape=alt.Shape("series:N", scale=shape_scale, legend=legend)))
 
+    # Square: with the equal data spans above, this makes pixels-per-unit
+    # identical on both axes, so angles (the tilt, the axes' orthogonality)
+    # render faithfully. autosize='pad' makes width/height mean the PLOTTING
+    # AREA: without it the renderer treats them as the whole svg budget and
+    # carves the axes and legend out of the plot, squashing the square.
     return alt.layer(*layers).properties(
-        height=PANEL_HEIGHT).configure_axis(**_AXIS)
+        width=PANEL_HEIGHT, height=PANEL_HEIGHT,
+        autosize=alt.AutoSizeParams(type="pad", contains="padding"),
+    ).configure_axis(**_AXIS)
 
 
 # ── 6. LaTeX ─────────────────────────────────────────────────────────────────
@@ -611,10 +660,11 @@ def render_formulation():
 
     st.markdown("#### Where the covariance comes from")
     st.markdown(
-        "Two declarations mark the pieces, and the covariance is then read "
-        "off the factorization the solve already produced. No second "
-        "optimization, and no finite differencing: one backsolve per fitted "
-        "parameter."
+        "Two declarations mark the estimated parameters and the residual "
+        "container, and the covariance is then read off the factorization "
+        "the solve already produced. There is no second optimization and "
+        "no finite differencing: the cost is one backsolve per fitted "
+        "parameter, a triangular solve that reuses the factorization."
     )
     st.code(
         "declare_fitted(m.A, m.k)      # these are the estimated parameters\n"
@@ -628,7 +678,7 @@ def render_formulation():
     st.latex(r"""
     \hat\sigma^{2} = \frac{\sum_i r_i^{2}}{n - p},
     \qquad
-    C = \hat\sigma^{2}\,\bigl(\text{reduced KKT}\bigr)^{-1},
+    C = \hat\sigma^{2}\,\bigl(\text{reduced Hessian}\bigr)^{-1},
     \qquad
     \mathrm{se}(\theta_j) = \sqrt{C_{jj}}
     """)
@@ -639,55 +689,44 @@ def render_formulation():
     )
     st.latex(r"""
     \Bigl\{\,\theta \;:\;
-    (\theta-\hat\theta)^{\mathsf T} C^{-1} (\theta-\hat\theta)
+    (\theta-\theta^{0})^{\mathsf T} C^{-1} (\theta-\theta^{0})
     \;\le\; \chi^{2}_{2,\,0.95} = 5.991 \,\Bigr\}
     """)
     st.markdown(
-        "Every mark in the right-hand panel is a reading of that one "
-        "expression:"
+        "For a practitioner the center $\\theta^{0}$ is the estimate. The "
+        "panel here centers it on the truth instead, so the Monte Carlo "
+        "cloud lands directly on the drawn curve. Every mark in the panel "
+        "comes from that one expression:"
     )
     st.latex(r"""
-    \begin{aligned}
-    \text{semi-axes:}   \quad & \sqrt{5.991\,\lambda_i}
-                                \ \text{along the eigenvectors of } C \\
-    \text{bounding box:}\quad & \pm\sqrt{5.991}\;\mathrm{se}(\theta_j)
-                                = \pm 2.4477\,\mathrm{se}(\theta_j) \\
-    \text{marginal interval:}\quad & \pm 1.96\,\mathrm{se}(\theta_j)
-    \end{aligned}
+    \text{principal axes:}\quad \sqrt{5.991\,\lambda_i}
+    \ \text{along the eigenvectors of } C
     """)
     st.markdown(
-        "The box depends only on the diagonal of $C$. Zeroing the "
-        "off-diagonal therefore produces a different ellipse inscribed in "
-        "**the same box**, which is exactly what the faint companion curve "
-        "shows: the covariance term does not change either parameter's own "
-        "spread, it only tilts and squeezes the joint region inside that "
-        "box. It also explains the crosshair, which is shorter than the box "
-        "by a factor of $2.4477/1.96 = 1.249$: reading a joint region off "
-        "two individual error bars understates it."
+        "The diagonal of $C$ alone sets how far the region reaches along "
+        "each axis, at $\\pm\\sqrt{5.991}\\,\\mathrm{se} = "
+        "\\pm 2.4477\\,\\mathrm{se}$. Zeroing the off-diagonal therefore "
+        "produces the faint companion ellipse with exactly the same reach: "
+        "the covariance term does not change either parameter's own spread, "
+        "it only tilts and reshapes the joint region. A single parameter's "
+        "own 95% interval is the shorter $\\pm 1.96\\,\\mathrm{se}$, so "
+        "reading the joint region off two individual error bars understates "
+        "it by a factor of $2.4477/1.96 = 1.249$ in each direction."
     )
 
     st.markdown("#### What the Monte Carlo checks")
     st.markdown(
-        "The ellipse claims to describe the sampling distribution of the "
-        "estimates. The sweep tests that claim directly by refitting many "
-        "independent datasets drawn from the same truth and noise, and "
-        "counting how many land inside. The reported coverage is measured "
-        "against the region centered at the **true** parameters, drawn as "
-        "the dashed reference curve, because that is the distribution the "
-        "refits are actually sampled from. Centering on one estimate instead "
-        "would cover only about 78%, since two independent estimates differ "
-        "with twice the covariance."
+        "The matrix claims the estimates scatter about the truth with "
+        "covariance $C$. The sweep tests that claim directly: each draw "
+        "generates an independent dataset from the same truth and noise, "
+        "refits it, and the coverage metric counts the fraction of the "
+        "refitted estimates that land inside the drawn region."
     )
     st.markdown(
-        "That reference region is also built from the **known** noise level "
-        "rather than this dataset's $\\hat\\sigma$. The solid ellipse and the "
-        "matrix beside it use $\\hat\\sigma$, because that is what a "
-        "practitioner actually has, but $\\hat\\sigma$ carries its own "
-        "chi-square fluctuation: draw a dataset whose $\\hat\\sigma$ lands "
-        "15% low and the solid ellipse shrinks with it, which would drag the "
-        "measured coverage well below 95% even though nothing is wrong with "
-        "the method. Comparing the two curves shows exactly how much that "
-        "one nuisance parameter moves the answer."
+        "The count runs a little under 95% on small datasets, because the "
+        "region's size inherits $\\hat\\sigma$, which is itself an estimate "
+        "with sampling error. Add data points and the coverage approaches "
+        "95% as $\\hat\\sigma$ converges on the true noise."
     )
     st.markdown(
         "Narrowing the x range to a short late window is worth trying: there "
@@ -724,6 +763,28 @@ CSS = """
 [data-testid="stSidebarHeader"] {
     display: none !important;
 }
+
+/* Metric labels (Â, k̂, correlation, σ̂, coverage) run small by default;
+   these are the row a reader scans first, so bump them. */
+[data-testid="stMetricLabel"] p {
+    font-size: 1.1rem !important;
+}
+
+/* Metric values sized so "estimate ± se" fits on one line in its column. */
+[data-testid="stMetricValue"] {
+    font-size: 1.5rem !important;
+}
+
+/* The run-the-sweep note sits in a metric-row slot and must stay on one
+   line. Scoped by container key: the other alerts (solver errors, pounce
+   notes) are real paragraphs and must keep wrapping. */
+.st-key-mc_note [data-testid="stAlert"] p {
+    white-space: nowrap;
+    font-size: 0.85rem;
+}
+.st-key-mc_note [data-testid="stAlert"] {
+    padding: 0.4rem 0.75rem;
+}
 [data-testid="stSidebarUserContent"] {
     padding-top: 0.5rem !important;
 }
@@ -735,110 +796,119 @@ CSS = """
 
 def render_main(d, a_true, k_true, sigma):
     if d["status"] != "optimal":
+        # Failed fit: the panels stay put. The data panel still has the
+        # sample and the true curve, and seeing the truth buried in noise is
+        # the visual explanation; the other two slots hold their places so
+        # the layout does not jump.
         x = np.asarray(d["x"], dtype=float)
         signal = float(np.mean(np.abs(a_true * np.exp(-k_true * x))))
         snr = signal / sigma if sigma > 0 else np.inf
-        st.error(
-            f"The fit did not converge (solver returned: {d['status']}).\n\n"
-            f"Over this x range the signal averages {signal:.3g} while the "
-            f"noise is σ = {sigma:g}, a signal-to-noise ratio of "
-            f"{snr:.2f}. Below about 1 the data carry almost no information "
-            "about A and k, and there is no curve left to fit. Widen the x "
-            "range toward x = 0, lower the noise, or add data points."
+        left, mid, right, _spacer = st.columns([3.8, 1.75, 5.0, 1.8],
+                                               gap="medium")
+        with left:
+            st.markdown("**Data and fit**")
+            st.altair_chart(data_panel(d, a_true, k_true), width="content")
+        with mid:
+            st.markdown("**Covariance**")
+            st.caption("No fit, so there is no covariance to report.")
+        with right:
+            st.markdown("**Parameter space**")
+            st.caption("No fit, so there is no region to draw.")
+        if d["status"] == "singular":
+            what = ("The fit converged, but there is not enough signal in "
+                    "this window to tell A and k apart, so no covariance "
+                    "exists.")
+        else:
+            what = ("There is not enough signal in this window to fit: the "
+                    "data are noise around a flat line.")
+        st.warning(
+            f"{what} Widen the x range toward x = 0, lower the noise, or "
+            "add data points. Details on the Logs tab."
         )
+        # The numbers behind the message, for the Logs tab.
+        d["note_details"] = [
+            f"solver status: {d['status']}"
+            + (f" ({d['detail']})" if d.get("detail") else ""),
+            f"mean |signal| over this window: {signal:.3g}; "
+            f"noise sigma: {sigma:g}; signal-to-noise ratio: {snr:.2f}",
+        ]
         return
 
     mc = st.session_state.mc
-    C = np.asarray(d["C"], dtype=float)
+    C = np.asarray(d["C_plot"], dtype=float)
 
-    left, mid, right = st.columns([5, 3, 5], gap="medium")
+    # The right column carries the square plot plus its side legend, so it
+    # gets the extra width; squeezing the legend into a 5/13 column scales
+    # the whole chart down to fit, shrinking the plot with it.
+    # Column ratios match the three charts' rendered widths (data ~370,
+    # matrix ~170, parameter ~495) with a trailing spacer that soaks up
+    # whatever page width is left over. Without the spacer the slack lands
+    # INSIDE the row and pushes the panels apart.
+    left, mid, right, _spacer = st.columns([3.8, 1.75, 5.0, 1.8],
+                                           gap="medium")
     with left:
         st.markdown("**Data and fit**")
-        st.altair_chart(data_panel(d, a_true, k_true), width="stretch")
+        st.altair_chart(data_panel(d, a_true, k_true), width="content")
     with mid:
         st.markdown("**Covariance**")
-        st.altair_chart(matrix_panel(C, "reported by covariance()"),
-                        width="stretch")
-        if mc and mc.get("fits") and len(mc["fits"]) > 2:
-            emp = np.cov(np.asarray(mc["fits"], dtype=float).T)
-            st.altair_chart(
-                matrix_panel(emp, f"empirical, {len(mc['fits'])} refits",
-                             keyed=False),
-                width="stretch")
+        st.altair_chart(matrix_panel(C), width="content")
     with right:
         st.markdown("**Parameter space**")
+        # width="content", not "stretch": the panel is a fixed square so
+        # that angles render faithfully; stretching would undo that.
         st.altair_chart(parameter_panel(d, a_true, k_true, mc),
-                        width="stretch")
+                        width="content")
 
     se = d["se"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("A", f"{d['A']:.4f}", f"± {se[0]:.4f}  (true {a_true:g})",
-              delta_color="off")
-    c2.metric("k", f"{d['k']:.4f}", f"± {se[1]:.4f}  (true {k_true:g})",
-              delta_color="off")
-    c3.metric("correlation(A, k)", f"{d['corr']:+.3f}")
-    c4.metric("σ̂", f"{d['sigma_hat']:.4f}", f"true {sigma:g}",
-              delta_color="off")
-
-    for note in d.get("notes") or []:
-        st.warning(note, icon="⚠️")
-
-    evals, sloppy = eigen_summary(C)
-    ratio = evals[-1] / evals[0] if evals[0] > 0 else np.inf
-    st.caption(
-        f"Eigenvalues {evals[0]:.3e} and {evals[-1]:.3e} "
-        f"(ratio {ratio:.1f}), dominant direction "
-        f"({sloppy[0]:+.3f}, {sloppy[1]:+.3f}) in (A, k). "
-        f"The box is ±{np.sqrt(CHI2_95_2DOF):.4f} standard errors wide; "
-        f"the crosshair is ±{Z_95:.2f}."
-    )
-
-    st.divider()
+    # The last column is wider: it holds either the coverage metric or the
+    # run-the-sweep note, which must fit on one line.
+    c1, c2, c3, c4, c5 = st.columns([1.4, 1.4, 1.2, 0.8, 1.7])
+    # The ± one-standard-error rides inline with the estimate. True values
+    # are not repeated here: they are on the sidebar sliders already.
+    c1.metric("Â", f"{d['A']:.4f} ± {se[0]:.4f}")
+    c2.metric("k̂", f"{d['k']:.4f} ± {se[1]:.4f}")
+    c3.metric("correlation(Â, k̂)", f"{d['corr']:+.3f}")
+    c4.metric("σ̂", f"{d['sigma_hat']:.4f}")
     if mc and mc.get("fits"):
         fits = np.asarray(mc["fits"], dtype=float)
-        C_known = np.asarray(d.get("C_known", C), dtype=float)
-        cover = coverage_fraction(fits, [a_true, k_true], C_known)
-        binom_se = 100.0 * np.sqrt(0.95 * 0.05 / max(len(fits), 1))
-        m1, m2, m3 = st.columns(3)
-        m1.metric("coverage of the 95% region", f"{100 * cover:.1f}%",
-                  f"± {binom_se:.1f}% sampling noise", delta_color="off",
-                  help="Measured against the dashed region: centered at the "
-                       "true parameters and built from the known noise "
-                       "level. Centering on this one estimate instead would "
-                       "cover about 78%, and using this dataset's σ̂ would "
-                       "add its own fluctuation on top.")
-        m2.metric("covariance()", f"{1000 * d['cov_seconds']:.0f} ms",
-                  "one backsolve per parameter", delta_color="off")
-        m3.metric(f"Monte Carlo, {len(fits)} refits",
-                  f"{mc['seconds']:.1f} s",
-                  "one full solve per draw", delta_color="off")
+        dif = fits - np.array([a_true, k_true])
+        q = np.einsum("ij,jk,ik->i", dif, np.linalg.inv(C), dif)
+        cover = float((q <= CHI2_95_2DOF).mean())
+        c5.metric("coverage", f"{100 * cover:.1f}%",
+                  help="The fraction of refits inside the drawn 95% "
+                       "region. Counted against exactly what is plotted, "
+                       "so you can check it by eye.")
         if mc["failures"]:
             st.warning(f"{mc['failures']} of {mc['n_draws']} refits did not "
                        "converge and were dropped.")
     else:
-        st.info(
-            "The ellipse above came from one solve. Run the Monte Carlo "
-            "sweep in the sidebar to check it against independent refits.",
-            icon="🎲",
-        )
+        with c5, st.container(key="mc_note"):
+            st.info("Run the Monte Carlo sweep in the sidebar", icon="🎲")
+
+    for note in d.get("notes") or []:
+        st.warning(note, icon="⚠️")
 
 
 def render_logs(d):
     log = (d.get("log") or "").strip()
-    if not log:
+    if log:
+        st.caption(
+            "POUNCE's output for the displayed fit. The Monte Carlo refits "
+            "are solved with logging suppressed; only this fit's log is "
+            "kept."
+        )
+        st.code(log, language="text")
+    else:
         st.info("No solver output captured for the last fit.")
-        return
-    st.caption(
-        "pounce's output for the displayed fit. The Monte Carlo refits are "
-        "solved with logging suppressed; only this fit's log is kept."
-    )
-    st.code(log, language="text")
+    if d.get("note_details"):
+        st.caption("diagnostics for this fit, verbatim:")
+        st.code("\n".join(d["note_details"]), language="text")
 
 
 # ── 9. Main ──────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Estimation Covariance",
+    page_title="Parameter Estimation Covariance",
     page_icon="favicon.png",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -866,7 +936,7 @@ init_state()
 st.markdown(
     "<h2 style='margin: 0 0 0.25rem 0; padding: 0; font-size: 1.5rem; "
     "font-weight: 700;'>"
-    "Estimation Covariance "
+    "Parameter Estimation Covariance "
     "<a href='https://github.com/devin-griff/estimation-covariance' "
     "target='_blank' title='View source on GitHub' "
     "style='display: inline-block; vertical-align: 0.02em; "
@@ -888,39 +958,53 @@ st.markdown(
     "style='color: #6b7280; text-decoration: underline;'>Pyomo</a>"
     " + "
     "<a href='https://github.com/jkitchin/pounce' target='_blank' "
-    "style='color: #6b7280; text-decoration: underline;'>pounce</a>"
+    "style='color: #6b7280; text-decoration: underline;'>POUNCE</a>"
     "</span></h2>",
     unsafe_allow_html=True,
 )
-st.caption("Parameter uncertainty from one solve, checked against Monte Carlo")
+_caption_col, _ = st.columns([5, 3])
+with _caption_col:
+    st.markdown(
+        "Fit $y = A\\,e^{-kx}$ to noisy data. The covariance estimate for "
+        "$(\\hat{A}, \\hat{k})$ is the noise variance estimate "
+        "$\\hat{\\sigma}^{2}$ times the inverse of the reduced Hessian of "
+        "the Lagrangian, read off the KKT factorization the solver already "
+        "holds: one backsolve per parameter, no second optimization. The "
+        "principal axes drawn in parameter space are the "
+        "eigenvectors of that matrix, with lengths scaled by the "
+        "eigenvalues. The Monte Carlo sweep checks it by brute force, one "
+        "full refit per draw."
+    )
 
 # ---- Sidebar: the experiment ----
 st.sidebar.header("Truth")
-st.sidebar.slider("A", 0.5, 5.0, key="a_true", step=0.1)
-st.sidebar.slider("k", 0.2, 3.0, key="k_true", step=0.1)
+st.sidebar.slider("A", 0.5, 5.0, key="a_true", step=0.1, format="%.1f")
+st.sidebar.slider("k", 0.2, 3.0, key="k_true", step=0.1, format="%.1f")
 st.sidebar.slider("noise σ", 0.005, 0.50, key="sigma", step=0.005,
                   format="%.3f")
 
-st.sidebar.header("Sampling")
-st.sidebar.slider(
-    "x range", 0.0, 6.0, step=0.1, key="x_range",
-    help="Narrow this to a short late window to see A and k become "
-         "unidentifiable: the correlation runs to nearly 1 and the ellipse "
-         "collapses to a sliver.",
-)
+# Section header with the dataset seed beside it: stepping the seed IS the
+# new-dataset action, so it needs no separate button. The seed sits in the
+# middle of the panel's width, bottom-aligned with the header.
+_hd, _seed_col, _ = st.sidebar.columns([2.4, 2.2, 0.9],
+                                       vertical_alignment="bottom")
+_hd.header("Sampling")
+_seed_col.number_input("seed", 0, 99999, key="seed", step=1)
+st.sidebar.slider("x range", 0.0, 6.0, step=0.1, key="x_range",
+                  format="%.1f")
 st.sidebar.slider("data points", 5, 100, key="n_pts", step=1)
-sc1, sc2 = st.sidebar.columns([2, 3])
-sc1.number_input("seed", 0, 99999, key="seed", step=1)
-sc2.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-sc2.button("New dataset", on_click=reroll_data, width="stretch")
 
-st.sidebar.header("Monte Carlo")
+# Header row mirrors the Sampling section: its seed sits beside the title.
+# Stepping it selects a fresh block of synthetic datasets and drops the
+# stored cloud, so coverage is visibly a sampled number, not a constant.
+_mh, _mc_seed_col, _ = st.sidebar.columns([2.4, 2.2, 0.9],
+                                          vertical_alignment="bottom")
+_mh.header("Monte Carlo")
+_mc_seed_col.number_input("seed", 0, 99999, key="mc_seed", step=1)
 st.sidebar.slider("refits", MC_MIN, MC_MAX, key="n_draws", step=MC_STEP,
                   help="Each refit is a full NLP solve. 200 is enough to "
                        "confirm the coverage to within sampling noise.")
-mc1, mc2 = st.sidebar.columns(2)
-run_mc = mc1.button("Run sweep", type="primary", width="stretch")
-mc2.button("New draws", on_click=reroll_mc, width="stretch")
+run_mc = st.sidebar.button("Run sweep", type="primary", width="stretch")
 mc_slot = st.sidebar.empty()
 
 # A stored cloud belongs to the settings that produced it. If any of those
