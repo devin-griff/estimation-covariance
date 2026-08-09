@@ -498,10 +498,13 @@ def parameter_panel(d, a_true, k_true, mc):
         with length sqrt(5.991 * eigenvalue);
       - the Monte Carlo cloud, once a sweep has been run.
 
-    Everything is centered on the TRUE parameters, which is where the
-    sampling distribution the refits are drawn from actually sits. The
-    estimate from this one dataset is a dot, since that is what it is: one
-    draw from the cloud.
+    The region is exactly what a practitioner would draw: the reported
+    matrix about THIS dataset's estimate. The truth is a fixed cross,
+    inside the region for 95% of datasets. The Monte Carlo cloud scatters
+    about the truth, not about the region's center, so the drawn region
+    captures a replication's estimate about 78% of the time ON AVERAGE
+    across datasets; any one dataset's capture depends on where its
+    estimate happened to land.
 
     The panel is square with an EQUAL data span on both axes, so one data
     unit is the same number of pixels in A as in k. That is what makes the
@@ -510,13 +513,13 @@ def parameter_panel(d, a_true, k_true, mc):
     """
     C = np.asarray(d["C_plot"], dtype=float)
     se = np.sqrt(np.diag(C))
-    center = np.array([a_true, k_true], dtype=float)
+    center = np.array([d["A"], d["k"]], dtype=float)
     half = np.sqrt(CHI2_95_2DOF) * se
 
     # Shared square domain: every plotted item fits, both axes span the same
     # width. Scales merge across layers, so every layer declares these.
     extent = [half[0], half[1],
-              abs(d["A"] - center[0]) * 1.3, abs(d["k"] - center[1]) * 1.3]
+              abs(a_true - center[0]) * 1.3, abs(k_true - center[1]) * 1.3]
     if mc and mc.get("fits"):
         pts = np.asarray(mc["fits"], dtype=float)
         extent += [np.abs(pts[:, 0] - center[0]).max(),
@@ -662,7 +665,9 @@ def render_formulation():
     st.markdown(
         "Two declarations mark the estimated parameters and the residual "
         "container, and the covariance is then read off the factorization "
-        "the solve already produced. There is no second optimization and "
+        "the solve already produced (the reduced Hessian: that "
+        "factorization restricted to the two fitted parameters). There "
+        "is no second optimization and "
         "no finite differencing: the cost is one backsolve per fitted "
         "parameter, a triangular solve that reuses the factorization."
     )
@@ -693,10 +698,9 @@ def render_formulation():
     \;\le\; \chi^{2}_{2,\,0.95} = 5.991 \,\Bigr\}
     """)
     st.markdown(
-        "For a practitioner the center $\\theta^{0}$ is the estimate. The "
-        "panel here centers it on the truth instead, so the Monte Carlo "
-        "cloud lands directly on the drawn curve. Every mark in the panel "
-        "comes from that one expression:"
+        "The center $\\theta^{0}$ is the estimate, exactly as a "
+        "practitioner would draw it. Every mark in the panel comes from "
+        "that one expression:"
     )
     st.latex(r"""
     \text{principal axes:}\quad \sqrt{5.991\,\lambda_i}
@@ -716,22 +720,29 @@ def render_formulation():
 
     st.markdown("#### What the Monte Carlo checks")
     st.markdown(
-        "The matrix claims the estimates scatter about the truth with "
-        "covariance $C$. The sweep tests that claim directly: each draw "
-        "generates an independent dataset from the same truth and noise, "
-        "refits it, and the coverage metric counts the fraction of the "
-        "refitted estimates that land inside the drawn region."
+        "The sweep asks a replication question: rerun the experiment, "
+        "refit, and see where the new estimate lands relative to the "
+        "region you drew. Each draw generates an independent dataset from "
+        "the same truth and noise, refits it, and the capture metric "
+        "counts the fraction of the refitted estimates inside the drawn "
+        "region."
     )
     st.markdown(
-        "The count runs a little under 95% on small datasets, because the "
-        "region's size inherits $\\hat\\sigma$, which is itself an estimate "
-        "with sampling error. Add data points and the coverage approaches "
-        "95% as $\\hat\\sigma$ converges on the true noise."
+        "Averaged across datasets that fraction is about 78%, not 95%. "
+        "The region is centered on your estimate, which carries its own "
+        "error, so a replication differs from the center with twice the "
+        "covariance. How much of the cloud your particular region "
+        "captures depends on where your estimate landed, so the number "
+        "moves as you step the sampling seed. The 95% belongs to a "
+        "different event: the region contains the **true** parameters for "
+        "95% of datasets. On screen that is a single yes-or-no per "
+        "dataset, the cross inside the region or not: it lands outside "
+        "about one seed in twenty."
     )
     st.markdown(
         "Narrowing the x range to a short late window is worth trying: there "
         "the data pin the local value and slope, while $A$ is a long "
-        "extrapolation back to $x=0$. The correlation runs to nearly 1 and "
+        "extrapolation back to $x=0$. The correlation rises to nearly 1 and "
         "the ellipse collapses to a sliver, which is what an unidentifiable "
         "pair looks like before any prediction is made."
     )
@@ -871,13 +882,18 @@ def render_main(d, a_true, k_true, sigma):
     c4.metric("σ̂", f"{d['sigma_hat']:.4f}")
     if mc and mc.get("fits"):
         fits = np.asarray(mc["fits"], dtype=float)
-        dif = fits - np.array([a_true, k_true])
+        dif = fits - np.array([d["A"], d["k"]])
         q = np.einsum("ij,jk,ik->i", dif, np.linalg.inv(C), dif)
         cover = float((q <= CHI2_95_2DOF).mean())
-        c5.metric("coverage", f"{100 * cover:.1f}%",
-                  help="The fraction of refits inside the drawn 95% "
-                       "region. Counted against exactly what is plotted, "
-                       "so you can check it by eye.")
+        c5.metric("capture of refits", f"{100 * cover:.1f}%",
+                  help="The fraction of refits inside the drawn region, "
+                       "checkable by eye. Averaged over datasets this is "
+                       "about 78%, not 95%, because the region's center "
+                       "is an estimate carrying its own error. Your "
+                       "dataset's number depends on where its estimate "
+                       "landed: step the sampling seed and watch it move. "
+                       "The region's 95% claim is about the truth: the "
+                       "cross lands inside for 95% of datasets.")
         if mc["failures"]:
             st.warning(f"{mc['failures']} of {mc['n_draws']} refits did not "
                        "converge and were dropped.")
