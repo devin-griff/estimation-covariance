@@ -90,7 +90,7 @@ DEFAULTS = {
     "sigma": 0.05,
     "x_range": (0.0, 3.0),
     "n_pts": 20,
-    "seed": 7,
+    "seed": 15,
     "n_draws": 200,
     "mc_seed": 0,
 }
@@ -300,6 +300,8 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
     fits = np.full((n_draws, 2), np.nan)
     opt = pyo.SolverFactory("pounce")
     failures = 0
+    ssr_total = 0.0
+    dof_total = 0
     t0 = time.perf_counter()
     try:
         for j in range(n_draws):
@@ -315,7 +317,14 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
             if str(res.solver.termination_condition) != "optimal":
                 failures += 1
             else:
-                fits[j] = (pyo.value(m.A), pyo.value(m.k))
+                a_j, k_j = pyo.value(m.A), pyo.value(m.k)
+                fits[j] = (a_j, k_j)
+                # The sweep's own noise estimate: pool every refit's residual
+                # sum of squares, each with n - 2 degrees of freedom, exactly
+                # the sigma-hat recipe applied to all the draws at once.
+                r_j = y - a_j * np.exp(-k_j * x)
+                ssr_total += float(r_j @ r_j)
+                dof_total += n_pts - 2
             m = None
             res = None
             if progress is not None and (j % 5 == 0 or j == n_draws - 1):
@@ -329,6 +338,7 @@ def run_monte_carlo(a_true, k_true, sigma, x_min, x_max, n_pts,
     ok = ~np.isnan(fits).any(axis=1)
     return {
         "fits": fits[ok].tolist(),
+        "sigma_mc": float(np.sqrt(ssr_total / dof_total)) if dof_total else None,
         "failures": failures,
         "seconds": time.perf_counter() - t0,
         "n_draws": int(n_draws),
@@ -441,13 +451,14 @@ def _fmt(v):
     return f"{v:.2e}"
 
 
-def matrix_panel(C):
-    """Middle panel: the covariance matrix itself.
+def matrix_panel(C, title):
+    """Middle panel: a covariance matrix as a 2x2 grid.
 
     Cells are colored by the ROLE each entry plays in the right-hand panel
-    rather than by magnitude, so the two panels read as one object: the
+    rather than by magnitude, so the panels read as one object: the
     diagonal entries set each parameter's spread, the shared off-diagonal
-    entry sets the tilt.
+    entry sets the tilt. The Monte Carlo matrix uses the same key, so the
+    two grids compare entry by entry at a glance.
     """
     C = np.asarray(C, dtype=float)
     names = ["A", "k"]
@@ -479,10 +490,14 @@ def matrix_panel(C):
     )
     text = base.mark_text(fontSize=16, fontWeight="bold", color="white").encode(
         text="label:N")
-    # Fixed size like the two plot panels, so the row's column ratios can be
-    # matched to the charts' true widths and the gaps come out uniform.
+    # Fixed and compact: two stacked matrices must fit beside the plot
+    # panels without growing the row when the empirical one appears. The
+    # rotated left-edge title names each matrix without a caption row.
     return alt.layer(cells, text).properties(
-        width=140, height=160,
+        width=140, height=110,
+        title=alt.TitleParams(title, orient="left", anchor="middle",
+                              fontSize=16, fontWeight="normal",
+                              color="#31333f"),
         autosize=alt.AutoSizeParams(type="pad", contains="padding"),
     )
 
@@ -725,7 +740,16 @@ def render_formulation():
         "region you drew. Each draw generates an independent dataset from "
         "the same truth and noise, refits it, and the capture metric "
         "counts the fraction of the refitted estimates inside the drawn "
-        "region."
+        "region. The sweep also shows the sample covariance of its "
+        "estimates, the same matrix measured by brute force. Expect the "
+        "shapes to agree and the scales to differ: the reported matrix "
+        "inherits this one dataset's $\\hat\\sigma$, the empirical one "
+        "inherits the true noise, and their ratio is roughly "
+        "$(\\hat\\sigma/\\sigma)^{2}$. That ratio is fixed by the sampling "
+        "seed and does not depend on the noise level: the seed sets the "
+        "standardized noise pattern and $\\sigma$ only scales it, so "
+        "$\\hat\\sigma/\\sigma$ comes out the same at every $\\sigma$. "
+        "Stepping the seed is what moves it."
     )
     st.markdown(
         "Averaged across datasets that fraction is about 78%, not 95%. "
@@ -817,6 +841,7 @@ CSS = """
 }
 .st-key-mc_note [data-testid="stAlert"] {
     padding: 0.4rem 0.75rem;
+    width: fit-content;
 }
 [data-testid="stSidebarUserContent"] {
     padding-top: 0.5rem !important;
@@ -836,7 +861,7 @@ def render_main(d, a_true, k_true, sigma):
         x = np.asarray(d["x"], dtype=float)
         signal = float(np.mean(np.abs(a_true * np.exp(-k_true * x))))
         snr = signal / sigma if sigma > 0 else np.inf
-        left, mid, right, _spacer = st.columns([3.8, 1.75, 5.0, 1.8],
+        left, mid, right, _spacer = st.columns([3.7, 2.05, 5.05, 1.1],
                                                gap="medium")
         with left:
             st.markdown("**Data and fit**")
@@ -877,14 +902,25 @@ def render_main(d, a_true, k_true, sigma):
     # matrix ~170, parameter ~495) with a trailing spacer that soaks up
     # whatever page width is left over. Without the spacer the slack lands
     # INSIDE the row and pushes the panels apart.
-    left, mid, right, _spacer = st.columns([3.8, 1.75, 5.0, 1.8],
+    # Ratios match the charts' rendered widths (data ~370, matrix stack
+    # ~185 including its rotated title, parameter ~505 with legend), so
+    # each column fits its chart exactly and the gaps on both sides of the
+    # matrix column are the same uniform column gap.
+    left, mid, right, _spacer = st.columns([3.7, 2.05, 5.05, 1.1],
                                            gap="medium")
     with left:
         st.markdown("**Data and fit**")
         st.altair_chart(data_panel(d, a_true, k_true), width="content")
     with mid:
         st.markdown("**Covariance**")
-        st.altair_chart(matrix_panel(C), width="content")
+        st.altair_chart(matrix_panel(C, "single fit"), width="content")
+        if mc and mc.get("fits") and len(mc["fits"]) > 2:
+            # The same matrix measured by brute force: the sample covariance
+            # of the refitted estimates. The reported matrix inherits this
+            # one dataset's sigma-hat; this one inherits the truth.
+            emp = np.cov(np.asarray(mc["fits"], dtype=float).T)
+            st.altair_chart(matrix_panel(emp, "Monte Carlo"),
+                            width="content")
     with right:
         st.markdown("**Parameter space**")
         # width="content", not "stretch": the panel is a fixed square so
@@ -895,27 +931,29 @@ def render_main(d, a_true, k_true, sigma):
     se = d["se"]
     # The last column is wider: it holds either the coverage metric or the
     # run-the-sweep note, which must fit on one line.
-    c1, c2, c3, c4, c5 = st.columns([1.4, 1.4, 1.2, 0.8, 1.7])
+    # The column split differs by state so nothing floats in dead space:
+    # with a sweep, six tight slots; without one, the run-the-sweep note
+    # sits directly to the right of the last visible number, wide enough
+    # that its single line stays inside the box.
+    if mc and mc.get("fits"):
+        c1, c2, c3, c4, c5, c6 = st.columns([1.3, 1.3, 1.2, 0.9, 1.0, 1.6])
+    else:
+        c1, c2, c3, c4, c5 = st.columns([1.3, 1.3, 1.2, 0.9, 2.9])
+        c6 = c5
     # The ± one-standard-error rides inline with the estimate. True values
     # are not repeated here: they are on the sidebar sliders already.
     c1.metric("Â", f"{d['A']:.4f} ± {se[0]:.4f}")
     c2.metric("k̂", f"{d['k']:.4f} ± {se[1]:.4f}")
     c3.metric("correlation(Â, k̂)", f"{d['corr']:+.3f}")
-    c4.metric("σ̂", f"{d['sigma_hat']:.4f}")
+    c4.metric("σ̂ (single fit)", f"{d['sigma_hat']:.4f}")
     if mc and mc.get("fits"):
+        if mc.get("sigma_mc"):
+            c5.metric("σ̂ (Monte Carlo)", f"{mc['sigma_mc']:.4f}")
         fits = np.asarray(mc["fits"], dtype=float)
         dif = fits - np.array([d["A"], d["k"]])
         q = np.einsum("ij,jk,ik->i", dif, np.linalg.inv(C), dif)
         cover = float((q <= CHI2_95_2DOF).mean())
-        c5.metric("capture of refits", f"{100 * cover:.1f}%",
-                  help="The fraction of refits inside the drawn region, "
-                       "checkable by eye. Averaged over datasets this is "
-                       "about 78%, not 95%, because the region's center "
-                       "is an estimate carrying its own error. Your "
-                       "dataset's number depends on where its estimate "
-                       "landed: step the sampling seed and watch it move. "
-                       "The region's 95% claim is about the truth: the "
-                       "cross lands inside for 95% of datasets.")
+        c6.metric("capture of refits", f"{100 * cover:.1f}%")
         if mc["failures"]:
             st.warning(f"{mc['failures']} of {mc['n_draws']} refits did not "
                        "converge and were dropped.")
