@@ -1,7 +1,7 @@
 # pounce supplies the covariance primitive this app is built around
-# (declare_fitted / declare_residual / covariance), which landed in the
-# 0.8 line. Pin the minor so a rebuild cannot drop to a release without it.
-pyomo-pounce~=0.8
+# (declare_fitted / declare_residual / covariance). covariance() first
+# shipped in 0.9, so the floor must not drop below it.
+pyomo-pounce~=0.9
 pyomo~=6.10
 #
 # Stable surface APIs at our usage level (sliders, charts), so accept patch
