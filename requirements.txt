@@ -4,10 +4,13 @@
 pyomo-pounce~=0.9
 pyomo~=6.10
 #
-# Stable surface APIs at our usage level (sliders, charts), so accept patch
-# upgrades. pandas stays on 2.x: Streamlit 1.52+ caps pandas <3, so a ~=3.0
-# pin makes the image's pip resolve impossible.
-streamlit~=1.52
+# streamlit is pinned to the minor that local dev runs: newer minors change
+# widget rendering (1.61 hides the number_input steppers at the sidebar seed
+# columns' width), so the image must not resolve ahead of what is checked
+# locally. pandas stays on 2.x: Streamlit caps pandas <3, so a ~=3.0 pin
+# makes the image's pip resolve impossible. The rest are stable surface APIs
+# at our usage level (sliders, charts), so accept patch upgrades.
+streamlit~=1.57.0
 pandas~=2.0
 numpy~=1.26
 altair~=5.0
