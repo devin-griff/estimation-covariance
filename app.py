@@ -1059,20 +1059,25 @@ st.sidebar.slider("k", 0.2, 3.0, key="k_true", step=0.1, format="%.1f")
 st.sidebar.slider("noise σ", 0.005, 0.50, key="sigma", step=0.005,
                   format="%.3f")
 
-# Stepping the seed IS the new-dataset action, so it needs no separate
-# button. The seed is a full-width sidebar widget, matching the seed
-# inputs in the other apps: Streamlit hides the +/- steppers in
-# narrower columns.
-st.sidebar.header("Sampling")
-st.sidebar.number_input("seed", 0, 99999, key="seed", step=1)
+# Section header with the dataset seed beside it: stepping the seed IS the
+# new-dataset action, so it needs no separate button. The seed column runs
+# to the sidebar edge: Streamlit hides the +/- steppers below ~125 px, so
+# the column keeps the full remaining width rather than leaving a spacer.
+_hd, _seed_col = st.sidebar.columns([2.4, 3.1],
+                                    vertical_alignment="bottom")
+_hd.header("Sampling")
+_seed_col.number_input("seed", 0, 99999, key="seed", step=1)
 st.sidebar.slider("x range", 0.0, 6.0, step=0.1, key="x_range",
                   format="%.1f")
 st.sidebar.slider("data points", 5, 100, key="n_pts", step=1)
 
-# Stepping this seed selects a fresh block of synthetic datasets and drops
-# the stored cloud, so coverage is visibly a sampled number, not a constant.
-st.sidebar.header("Monte Carlo")
-st.sidebar.number_input("seed", 0, 99999, key="mc_seed", step=1)
+# Header row mirrors the Sampling section: its seed sits beside the title.
+# Stepping it selects a fresh block of synthetic datasets and drops the
+# stored cloud, so coverage is visibly a sampled number, not a constant.
+_mh, _mc_seed_col = st.sidebar.columns([2.4, 3.1],
+                                       vertical_alignment="bottom")
+_mh.header("Monte Carlo")
+_mc_seed_col.number_input("seed", 0, 99999, key="mc_seed", step=1)
 st.sidebar.slider("refits", MC_MIN, MC_MAX, key="n_draws", step=MC_STEP,
                   help="Each refit is a full NLP solve. 200 is enough to "
                        "confirm the coverage to within sampling noise.")
