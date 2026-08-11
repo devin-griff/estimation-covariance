@@ -1060,10 +1060,11 @@ st.sidebar.slider("noise σ", 0.005, 0.50, key="sigma", step=0.005,
                   format="%.3f")
 
 # Section header with the dataset seed beside it: stepping the seed IS the
-# new-dataset action, so it needs no separate button. The seed sits in the
-# middle of the panel's width, bottom-aligned with the header.
-_hd, _seed_col, _ = st.sidebar.columns([2.4, 2.2, 0.9],
-                                       vertical_alignment="bottom")
+# new-dataset action, so it needs no separate button. The seed column runs
+# to the sidebar edge: Streamlit hides the +/- steppers below ~125 px, so
+# the column keeps the full remaining width rather than leaving a spacer.
+_hd, _seed_col = st.sidebar.columns([2.4, 3.1],
+                                    vertical_alignment="bottom")
 _hd.header("Sampling")
 _seed_col.number_input("seed", 0, 99999, key="seed", step=1)
 st.sidebar.slider("x range", 0.0, 6.0, step=0.1, key="x_range",
@@ -1073,8 +1074,8 @@ st.sidebar.slider("data points", 5, 100, key="n_pts", step=1)
 # Header row mirrors the Sampling section: its seed sits beside the title.
 # Stepping it selects a fresh block of synthetic datasets and drops the
 # stored cloud, so coverage is visibly a sampled number, not a constant.
-_mh, _mc_seed_col, _ = st.sidebar.columns([2.4, 2.2, 0.9],
-                                          vertical_alignment="bottom")
+_mh, _mc_seed_col = st.sidebar.columns([2.4, 3.1],
+                                       vertical_alignment="bottom")
 _mh.header("Monte Carlo")
 _mc_seed_col.number_input("seed", 0, 99999, key="mc_seed", step=1)
 st.sidebar.slider("refits", MC_MIN, MC_MAX, key="n_draws", step=MC_STEP,
