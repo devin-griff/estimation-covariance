@@ -846,6 +846,19 @@ CSS = """
 [data-testid="stSidebarUserContent"] {
     padding-top: 0.5rem !important;
 }
+
+/* Seed fields beside the section headers: the compact number-field
+   selectors from plant-layout's object editor. The column stays wide
+   enough that Streamlit's width check keeps the +/- steppers; the field
+   itself is capped so the value sits next to the buttons instead of
+   stretching across the column. */
+[data-testid="stSidebar"] [data-testid="stNumberInputContainer"] {
+    max-width: 6.5rem;
+}
+[data-testid="stSidebar"] [data-testid="stNumberInputContainer"] input {
+    padding-top: 0.25rem; padding-bottom: 0.25rem;
+    text-align: right; padding-right: 0.4rem;
+}
 </style>
 """
 
@@ -1060,9 +1073,11 @@ st.sidebar.slider("noise σ", 0.005, 0.50, key="sigma", step=0.005,
                   format="%.3f")
 
 # Section header with the dataset seed beside it: stepping the seed IS the
-# new-dataset action, so it needs no separate button. The seed column runs
-# to the sidebar edge: Streamlit hides the +/- steppers below ~125 px, so
-# the column keeps the full remaining width rather than leaving a spacer.
+# new-dataset action, so it needs no separate button. Streamlit hides the
+# +/- steppers below ~125 px of column width, so the column takes the full
+# remaining share; the CSS section caps the field itself at 6.5rem
+# (plant-layout's compact number-field pattern), which keeps the value
+# next to the steppers instead of stretching across the column.
 _hd, _seed_col = st.sidebar.columns([2.4, 3.1],
                                     vertical_alignment="bottom")
 _hd.header("Sampling")
